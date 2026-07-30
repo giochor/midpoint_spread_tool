@@ -52,7 +52,7 @@ A bad set of rows (all at the same impression level) tells the fitter almost not
 | 15,000,000 | 9,100,000 | Cannot fit a curve from one point |
 | 15,000,000 | 8,700,000 | |
 
-**Minimum 2 rows at different impression levels per channel. 5+ is strongly recommended.**
+**Minimum 3 rows at different impression levels per channel (CT-mode requires 3 points above the 5% density threshold). 6+ is strongly recommended for a High-confidence result.**
 
 ---
 
@@ -116,7 +116,7 @@ The file has no market column — the tool is run per-market, so the market is i
 ### Tips for good data
 
 - **Cover a range of impression levels.** The single most important thing is to have rows at different spend levels — one low, one high, and ideally some in between. Two rows at the same impression level are almost useless.
-- **Minimum 2 rows per channel; 5+ is recommended.** Two rows give a valid but uncertain fit. Five or more rows give a stable, reliable result.
+- **Minimum 3 rows per channel; 6+ is recommended.** In CT-mode, only rows above the 5% impression density threshold count toward the minimum. Six or more qualifying rows give a High-confidence, stable result.
 - **Keep targeting consistent across rows.** Mixing a broad-audience campaign with a narrow-targeted campaign distorts the curve because the effective audience size changes between them.
 - **Keep campaign length broadly similar across rows.** Avoid mixing 7-day and 90-day campaigns in the same fit — reach builds differently over time and this will introduce noise.
 - **Do not mix channel types for the same channel name.** Each `(channel_name, channel_type)` pair is fitted independently. If ITV Hub runs on both ATV and CTV, use separate rows with different `channel_type` values.
@@ -169,23 +169,43 @@ pip install -r requirements.txt
 
 Make sure the virtual environment is active (`source .venv/bin/activate`) before running.
 
+### Recommended: CT-mode
+
+CT-mode fits the logistic curve to the **operational impression range only** (impression density ≥ 5% of total adults). FCAP's formula is nearly linear at very low impression density — the logistic model diverges there and produces large errors if those points are included. CT-mode excludes them and produces mu/sigma calibrated to where Reach Optimisation actually evaluates reach in real campaigns.
+
 ```bash
-# Print results to console
-python fit_reach_params.py reach_parameter_template.csv
+# Recommended — CT-mode fit (implies --residuals)
+python fit_reach_params.py my_data.csv --ct-mode
 
-# Save results to a CSV file
-python fit_reach_params.py my_data.csv --output results.csv
+# CT-mode with results written to CSV
+python fit_reach_params.py my_data.csv --ct-mode --output results.csv
 
-# Also generate fitted curve plots (saved as reach_curves.png)
-python fit_reach_params.py my_data.csv --output results.csv --plot
+# CT-mode with curve plots (saved as reach_curves.png)
+python fit_reach_params.py my_data.csv --ct-mode --output results.csv --plot
 ```
 
-or 
+To validate using the included real ATV data:
 
 ```bash
-# Print results to console
-.venv/bin/python fit_reach_params.py test_fcap.csv
+python fit_reach_params.py test_fcap_old.csv --ct-mode
+# Expected output: mu=0.1819, sigma=0.1617, R²=0.9955, max error ±6%
+```
 
+### Other modes
+
+```bash
+# Standard 3-parameter fit (all data points — use as a baseline reference)
+python fit_reach_params.py reach_parameter_template.csv
+
+# Show per-point residuals without CT-mode
+python fit_reach_params.py my_data.csv --residuals
+
+# Fix k (capacity) to a known value and fit only mu and sigma
+# Use when you already know the channel's saturation ceiling from CT output
+python fit_reach_params.py my_data.csv --fixed-k 0.1189
+
+# Without activating the venv — call Python directly
+.venv/bin/python fit_reach_params.py my_data.csv --ct-mode
 ```
 
 ---
@@ -200,30 +220,54 @@ or
 ================================================================================
 
   FITTED PARAMETERS
-  ────────────────────────────────────────────────────────────────────────────
-  Channel                      Type          mu   sigma      R²  Confidence
-  ────────────────────────────────────────────────────────────────────────────
-  ITV Hub                      ATV       0.3821  0.7834  0.9941  High
-  Sky AdSmart                  ATV       0.2960  0.6102  0.9874  Medium
-  Ocean Outdoor                DOOH      0.6340  1.5200  0.9512  Low (!)
-  Spotify                      Audio     0.4280  0.7910  0.9963  Medium
+  ──────────────────────────────────────────────────────────────────────────────────
+  Channel                      Type       k (cap)      mu   sigma      R²  Confidence
+  ──────────────────────────────────────────────────────────────────────────────────
+  ITV Hub                      ATV         0.1189  0.1819  0.1617  0.9955  High
+  Sky AdSmart                  ATV         0.2960  0.6102  0.9874  0.9874  Medium
+  Ocean Outdoor                DOOH        0.3100  0.6340  1.5200  0.9512  Low (!)
+  Spotify                      Audio       0.3000  0.4280  0.7910  0.9963  Medium
 
+  [F] = k was fixed by --fixed-k (not fitted from data)
   (!) = warnings present — see details below
 
   WARNING — Ocean Outdoor:
     • mu standard error is large — more data points would improve precision
 ```
 
+In CT-mode, a **PER-POINT RESIDUALS** section is also printed, showing impressions, actual reach, model reach, and percentage error for each data point.
+
+### Confidence levels
+
+CT-mode (recommended):
+
+| Level | Meaning |
+|-------|---------|
+| High | 6+ operational data points |
+| Medium | 4–5 operational data points |
+| Low (few points) | 3 operational data points — provisional, collect more |
+
+Standard mode:
+
+| Level | Meaning |
+|-------|---------|
+| High | 8+ data points |
+| Medium | 5–7 data points |
+| Low (few points) | fewer than 5 data points — provisional, collect more |
+
 ### Output CSV columns
 
 | Column | Description |
 |--------|-------------|
+| `k (capacity)` | Fitted capacity — maximum reachable fraction of total addressable adults. Informational only. |
+| `k_fixed` | `True` if k was fixed via `--fixed-k`, `False` if fitted from data |
 | `mu (midpoint)` | Fitted Mid-point — write this to `reach_midpoint_parameter` in PPS |
 | `sigma (spread)` | Fitted Spread — write this to `reach_spread_parameter` in PPS |
+| `k_std_err` | Standard error on k — lower is better |
 | `mu_std_err` | Standard error on mu — lower is better |
 | `sigma_std_err` | Standard error on sigma — lower is better |
 | `r_squared` | Goodness of fit. 1.0 = perfect match. Above 0.95 is good; below 0.90 means more data is needed |
-| `confidence` | `High` (6+ data points), `Medium` (3–5), `Low` (2 points — provisional) |
+| `confidence` | See confidence levels above |
 | `warnings` | Any fit quality issues to review |
 
 ---
@@ -280,7 +324,8 @@ How steeply the transition from "unlikely reached" to "likely reached" occurs. A
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| "Need at least 2 data points — skipped" | Only one row for this channel | Add at least one more row at a different impression level |
+| "Only N data point(s) above density threshold — need at least 3" | CT-mode: fewer than 3 rows have impression density ≥ 5% of total adults | Add rows at higher impression levels, or check that `total_addressable_adults` is not too high |
+| "Need at least 2/3 data points — skipped" | Too few rows for this channel | Add at least 3 rows at different impression levels |
 | "Curve fitting did not converge" | All rows at the same impression level, or extreme outliers | Ensure rows span a range of impression volumes; check for data entry errors |
 | R² below 0.90 | Noisy data or the logistic model is a poor fit for this channel | Add more rows; check that `impressions_delivered` and `reach_adults` are from the same campaign |
 | Large standard errors | Too few points, or points clustered at one end of the curve | Add a point at the opposite end (e.g. a high-spend campaign if all current rows are low-spend) |
@@ -294,6 +339,6 @@ How steeply the transition from "unlikely reached" to "likely reached" occurs. A
 
 2. **No time-decay correction.** FCAP widens sigma slightly for longer campaigns (`+0.0003 × days`). This POC fits raw data without that correction. For campaigns of similar length (e.g. all 28-day), the effect is negligible.
 
-3. **2-point fits are provisional.** With exactly 2 data points the fit is mathematically exact but has no uncertainty estimate. Re-run once a third data point is available.
+3. **CT-mode requires 3 operational points.** Points below 5% impression density are excluded from the fit (they are shown in the residuals as approximate only). If fewer than 3 points remain above the threshold, the channel is skipped — add rows at higher spend levels.
 
 4. **Social channels are not supported.** Meta, TikTok, and Google channels use live API reach curves and do not use mu/sigma. Do not include them in the CSV.

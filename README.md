@@ -74,14 +74,24 @@ ATV,ATV,52000000,32240000,45801448
 ## Usage
 
 ```bash
-# Basic — print results to terminal
+# Recommended — CT-mode: fits to the operational impression range only (density ≥ 5% of total adults)
+# This minimises relative error across all real campaign impression levels
+python fit_reach_params.py my_data.csv --ct-mode
+
+# CT-mode with results written to CSV
+python fit_reach_params.py my_data.csv --ct-mode --output results.csv
+
+# Standard 3-parameter fit (fits all data points — use as a baseline reference)
 python fit_reach_params.py reach_parameter_template.csv
 
-# Save results to a CSV
-python fit_reach_params.py my_data.csv --output results.csv
+# Fix k (capacity) to a known value and fit only mu and sigma (2-parameter mode)
+python fit_reach_params.py my_data.csv --fixed-k 0.1189
 
-# Also generate fitted curve plots (saved as reach_curves.png)
-python fit_reach_params.py my_data.csv --output results.csv --plot
+# Show per-point predicted vs actual residuals (implied by --ct-mode)
+python fit_reach_params.py my_data.csv --residuals
+
+# Generate fitted curve plots (saved as reach_curves.png)
+python fit_reach_params.py my_data.csv --ct-mode --output results.csv --plot
 ```
 
 ## Output
@@ -94,24 +104,33 @@ The script prints a summary table with the fitted parameters and a confidence ra
 ================================================================================
 
   FITTED PARAMETERS
-  ----------------------------------------------------------------------------------
-  Channel                      Type        k (cap)      mu   sigma      R²  Confidence
-  ----------------------------------------------------------------------------------
-  ATV                          ATV          0.1234  0.4500  0.2100  0.9800  High
+  --------------------------------------------------------------------------------------
+  Channel                      Type       k (cap)      mu   sigma      R²  Confidence
+  --------------------------------------------------------------------------------------
+  ATV                          ATV         0.1189  0.1819  0.1617  0.9955  High
   ...
 
   HOW TO USE THESE VALUES
   Set reach_midpoint_parameter = mu    in the PPS channel table
   Set reach_spread_parameter   = sigma in the PPS channel table
+  k (capacity) is informational — it reflects the natural ceiling of the channel.
 ```
 
-Confidence levels:
+Confidence levels (CT-mode — recommended):
+
+| Level | Meaning |
+|-------|---------|
+| High | 6+ operational data points |
+| Medium | 4–5 operational data points |
+| Low (few points) | 3 operational data points — provisional, collect more |
+
+Confidence levels (standard mode):
 
 | Level | Meaning |
 |-------|---------|
 | High | 8+ data points |
 | Medium | 5–7 data points |
-| Low | 3–4 data points — provisional, collect more data |
+| Low | fewer than 5 data points — provisional, collect more data |
 
 If `--output` is specified, results are also written to a CSV with standard errors and R² for each channel.
 
@@ -122,7 +141,8 @@ If `--output` is specified, results are also written to a CSV with standard erro
 | `fit_reach_params.py` | Main script |
 | `reach_parameter_template.csv` | Worked example with 6 channels and synthetic data |
 | `template.csv` | Blank input template to fill in with real campaign data |
-| `test_fcap.csv` | Real ATV data used during development |
+| `test_fcap_old.csv` | Real ATV data (8 rows) used to validate CT-mode — produces mu=0.1819, sigma=0.1617 |
+| `test_fcap.csv` | Earlier ATV test data used during initial development |
 | `requirements.txt` | Python dependencies |
 | `reach_analysis.md` | Analysis notes and mathematical background |
 | `poc_guide.md` | Guide to the proof-of-concept approach |
