@@ -26,10 +26,151 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import curve_fit
-from scipy.optimize import OptimizeWarning
+from scipy.optimize import curve_fit, OptimizeWarning
 
 warnings.filterwarnings("ignore", category=OptimizeWarning)
+
+_CT_DENSITY_THRESHOLD = 0.05  # ignore points where impressions/total_adults < this value
+
+
+def fit_channel_ct(
+    channel_name: str,
+    channel_type: str,
+    group: pd.DataFrame,
+) -> "FitResult":
+    """
+    Fit the logistic to the OPERATIONAL impression range only.
+
+    FCAP's formula is not logistic-shaped at very low impression density
+    (impressions / total_addressable_adults < 0.05). In that regime FCAP
+    reach ≈ impressions (linear), while the logistic model always predicts
+    non-zero baseline reach — causing hundreds-of-percent errors.
+
+    CT-mode discards sub-threshold rows and fits k, mu, sigma only to the
+    medium-to-high density points where:
+      (a) real campaigns actually operate, and
+      (b) the logistic is a valid approximation of CT's own S-curve.
+
+    The resulting mu and sigma are therefore calibrated to the density range
+    CT will be evaluated at, producing the smallest achievable gap between
+    CT and FCAP reach outputs.
+    """
+    N = float(group["total_addressable_adults"].values[0])
+    density = group["impressions_delivered"] / N
+
+    # Split into operational (fits) and sub-threshold (residuals only)
+    mask_fit = density >= _CT_DENSITY_THRESHOLD
+    group_fit = group[mask_fit]
+    n_fit = len(group_fit)
+    n_total = len(group)
+    n_excluded = n_total - n_fit
+
+    base_kw = dict(
+        channel_name=channel_name,
+        channel_type=channel_type,
+        k=None,
+        mu=None,
+        sigma=None,
+        k_fixed=False,
+        k_std_err=None,
+        mu_std_err=None,
+        sigma_std_err=None,
+        r_squared=None,
+        data_points=n_total,
+        confidence="Insufficient data",
+        warning="",
+        residuals=None,
+    )
+
+    if n_fit < 3:
+        return FitResult(
+            **{**base_kw,
+               "warning": (
+                   f"Only {n_fit} data point(s) above density threshold "
+                   f"({_CT_DENSITY_THRESHOLD:.0%}) — need at least 3"
+               )}
+        )
+
+    x_fit = (group_fit["impressions_delivered"] / N).values.astype(float)
+    y_fit = (group_fit["reach_adults"] / N).values.astype(float)
+    y_fit = np.clip(y_fit, 0.0, 1.0)
+
+    defaults = CHANNEL_DEFAULTS.get(str(group["channel_type"].values[0]), GENERIC_DEFAULTS)
+
+    try:
+        p0 = list(defaults["p0"])
+        p0[0] = min(float(np.max(y_fit)) * 1.2, 1.0)
+
+        (k_fit, mu_fit, sigma_fit), cov = curve_fit(
+            logistic_reach,
+            x_fit,
+            y_fit,
+            p0=p0,
+            bounds=defaults["bounds"],
+            maxfev=20000,
+        )
+        perr = list(np.sqrt(np.diag(cov)))
+        y_pred_fit = logistic_reach(x_fit, k_fit, mu_fit, sigma_fit)
+    except RuntimeError:
+        return FitResult(
+            **{**base_kw,
+               "warning": "Curve fitting did not converge on operational data points — add more varied impression levels"}
+        )
+    except Exception as exc:
+        return FitResult(**{**base_kw, "warning": f"Fitting error: {exc}"})
+
+    r2 = _r_squared(y_fit, y_pred_fit)
+
+    if n_fit < 4:
+        confidence = "Low (few points)"
+    elif n_fit < 6:
+        confidence = "Medium"
+    else:
+        confidence = "High"
+
+    warnings_list = []
+    if n_excluded > 0:
+        warnings_list.append(
+            f"{n_excluded} sub-threshold point(s) (density < {_CT_DENSITY_THRESHOLD:.0%}) "
+            f"excluded from fit — shown in residuals as approximate only"
+        )
+    if r2 < 0.90:
+        warnings_list.append(
+            f"R²={r2:.3f} on operational points — add more data at varied impression levels"
+        )
+
+    # Compute residuals for ALL rows (fit + excluded), using the fitted curve
+    imps_all = group["impressions_delivered"].values.astype(float)
+    reach_all = group["reach_adults"].values.astype(float)
+    x_all = imps_all / N
+    pred_all = logistic_reach(x_all, k_fit, mu_fit, sigma_fit) * N
+
+    residuals = [
+        (
+            int(imps_all[i]),
+            int(reach_all[i]),
+            int(round(pred_all[i])),
+            (pred_all[i] - reach_all[i]) / reach_all[i] if reach_all[i] != 0 else float("nan"),
+        )
+        for i in range(n_total)
+    ]
+
+    return FitResult(
+        channel_name=channel_name,
+        channel_type=channel_type,
+        k=round(float(k_fit), 4),
+        mu=round(float(mu_fit), 4),
+        sigma=round(float(sigma_fit), 4),
+        k_fixed=False,
+        k_std_err=round(float(perr[0]), 4),
+        mu_std_err=round(float(perr[1]), 4),
+        sigma_std_err=round(float(perr[2]), 4),
+        r_squared=round(r2, 4),
+        data_points=n_total,
+        confidence=confidence,
+        warning="; ".join(warnings_list),
+        residuals=residuals,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +223,7 @@ class FitResult:
     k: float | None
     mu: float | None
     sigma: float | None
+    k_fixed: bool
     k_std_err: float | None
     mu_std_err: float | None
     sigma_std_err: float | None
@@ -89,6 +231,7 @@ class FitResult:
     data_points: int
     confidence: str
     warning: str
+    residuals: list | None  # list of (impressions, actual_adults, predicted_adults, rel_error)
 
 
 def _r_squared(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -101,6 +244,7 @@ def fit_channel(
     channel_name: str,
     channel_type: str,
     group: pd.DataFrame,
+    fixed_k: float | None = None,
 ) -> FitResult:
     n = len(group)
     base = FitResult(
@@ -109,6 +253,7 @@ def fit_channel(
         k=None,
         mu=None,
         sigma=None,
+        k_fixed=fixed_k is not None,
         k_std_err=None,
         mu_std_err=None,
         sigma_std_err=None,
@@ -116,33 +261,58 @@ def fit_channel(
         data_points=n,
         confidence="Insufficient data",
         warning="",
+        residuals=None,
     )
 
-    if n < 3:
-        base.warning = "Need at least 3 data points for the 3-parameter model — skipped" if n < 2 else "Need at least 3 data points for the 3-parameter model — skipped"
+    min_points = 2 if fixed_k is not None else 3
+    if n < min_points:
+        base.warning = f"Need at least {min_points} data points — skipped"
         return base
 
-    x = (group["impressions_delivered"] / group["total_addressable_adults"]).values
-    y = (group["reach_adults"] / group["total_addressable_adults"]).values
+    N = group["total_addressable_adults"].values[0]
+    x = (group["impressions_delivered"] / N).values
+    y = (group["reach_adults"] / N).values
+    imps_raw = group["impressions_delivered"].values
+    reach_raw = group["reach_adults"].values
 
-    # Clamp y to [0, 1] — protect against data entry errors
     y = np.clip(y, 0.0, 1.0)
 
     defaults = CHANNEL_DEFAULTS.get(channel_type, GENERIC_DEFAULTS)
 
-    # Seed k initial guess from the data: use observed max reach fraction
-    p0 = list(defaults["p0"])
-    p0[0] = min(float(np.max(y)) * 1.2, 1.0)
-
     try:
-        (k, mu, sigma), cov = curve_fit(
-            logistic_reach,
-            x,
-            y,
-            p0=p0,
-            bounds=defaults["bounds"],
-            maxfev=20000,
-        )
+        if fixed_k is not None:
+            k = fixed_k
+            p0_mu = defaults["p0"][1]
+            p0_sigma = defaults["p0"][2]
+
+            def model_2param(x_arr, mu, sigma):
+                return k / (1.0 + np.exp(-(x_arr - mu) / sigma))
+
+            (mu, sigma), cov_2p = curve_fit(
+                model_2param,
+                x,
+                y,
+                p0=[p0_mu, p0_sigma],
+                bounds=([0.001, 0.001], [2.0, 5.0]),
+                maxfev=20000,
+            )
+            y_pred = model_2param(x, mu, sigma)
+            perr_full = [0.0, *np.sqrt(np.diag(cov_2p))]
+        else:
+            p0 = list(defaults["p0"])
+            p0[0] = min(float(np.max(y)) * 1.2, 1.0)
+
+            (k, mu, sigma), cov = curve_fit(
+                logistic_reach,
+                x,
+                y,
+                p0=p0,
+                bounds=defaults["bounds"],
+                maxfev=20000,
+            )
+            y_pred = logistic_reach(x, k, mu, sigma)
+            perr_full = list(np.sqrt(np.diag(cov)))
+
     except RuntimeError:
         base.warning = "Curve fitting did not converge — try adding more data points at varied impression levels"
         return base
@@ -150,9 +320,7 @@ def fit_channel(
         base.warning = f"Fitting error: {exc}"
         return base
 
-    y_pred = logistic_reach(x, k, mu, sigma)
     r2 = _r_squared(y, y_pred)
-    perr = np.sqrt(np.diag(cov))
 
     if n < 5:
         confidence = "Low (few points — provisional, add more data)"
@@ -164,12 +332,19 @@ def fit_channel(
     warnings_list = []
     if r2 < 0.90:
         warnings_list.append(f"R²={r2:.3f} is below 0.90 — the logistic model may not fit this data well")
-    if perr[0] > 0.10:
+    if perr_full[0] > 0.10 and fixed_k is None:
         warnings_list.append("k (capacity) standard error is large — more data points would improve precision")
-    if perr[1] > 0.15:
+    if perr_full[1] > 0.15:
         warnings_list.append("mu standard error is large — more data points would improve precision")
-    if perr[2] > 0.50:
+    if perr_full[2] > 0.50:
         warnings_list.append("sigma standard error is large — more data points would improve precision")
+
+    residuals = []
+    for i, raw_i in enumerate(imps_raw):
+        actual = reach_raw[i]
+        predicted = y_pred[i] * N
+        rel_err = (predicted - actual) / actual if actual != 0 else float("nan")
+        residuals.append((int(raw_i), int(actual), int(round(predicted)), rel_err))
 
     return FitResult(
         channel_name=channel_name,
@@ -177,13 +352,15 @@ def fit_channel(
         k=round(float(k), 4),
         mu=round(float(mu), 4),
         sigma=round(float(sigma), 4),
-        k_std_err=round(float(perr[0]), 4),
-        mu_std_err=round(float(perr[1]), 4),
-        sigma_std_err=round(float(perr[2]), 4),
+        k_fixed=fixed_k is not None,
+        k_std_err=round(float(perr_full[0]), 4),
+        mu_std_err=round(float(perr_full[1]), 4),
+        sigma_std_err=round(float(perr_full[2]), 4),
         r_squared=round(r2, 4),
         data_points=n,
         confidence=confidence,
         warning="; ".join(warnings_list),
+        residuals=residuals,
     )
 
 
@@ -230,7 +407,7 @@ def load_csv(path: str) -> pd.DataFrame:
 # Output formatting
 # ---------------------------------------------------------------------------
 
-def print_results(results: list[FitResult]) -> None:
+def print_results(results: list[FitResult], show_residuals: bool = False) -> None:
     print()
     print("=" * 80)
     print("  REACH PARAMETER ESTIMATION RESULTS")
@@ -242,17 +419,19 @@ def print_results(results: list[FitResult]) -> None:
     if succeeded:
         print()
         print("  FITTED PARAMETERS")
-        print("  " + "-" * 82)
-        print(f"  {'Channel':<28} {'Type':<10} {'k (cap)':>8} {'mu':>7} {'sigma':>7} {'R²':>7} {'Confidence'}")
-        print("  " + "-" * 82)
+        print("  " + "-" * 86)
+        print(f"  {'Channel':<28} {'Type':<10} {'k (cap)':>10} {'mu':>7} {'sigma':>7} {'R²':>7} {'Confidence'}")
+        print("  " + "-" * 86)
         for r in succeeded:
             flag = " !" if r.warning else ""
+            k_str = f"{r.k:>8.4f}[F]" if r.k_fixed else f"{r.k:>10.4f}"
             print(
                 f"  {r.channel_name:<28} {r.channel_type:<10}"
-                f" {r.k:>8.4f} {r.mu:>7.4f} {r.sigma:>7.4f} {r.r_squared:>7.4f}"
+                f" {k_str} {r.mu:>7.4f} {r.sigma:>7.4f} {r.r_squared:>7.4f}"
                 f"  {r.confidence}{flag}"
             )
         print()
+        print("  [F] = k was fixed by --fixed-k (not fitted from data)")
         print("  (!) = warnings present — see details below")
 
         for r in succeeded:
@@ -261,6 +440,21 @@ def print_results(results: list[FitResult]) -> None:
                 print(f"  WARNING — {r.channel_name}:")
                 for w in r.warning.split(";"):
                     print(f"    • {w.strip()}")
+
+        if show_residuals:
+            print()
+            print("  PER-POINT RESIDUALS")
+            for r in succeeded:
+                if not r.residuals:
+                    continue
+                print()
+                print(f"  {r.channel_name} ({r.channel_type})  k={r.k}  mu={r.mu}  sigma={r.sigma}")
+                print(f"  {'Impressions':>14}  {'Actual reach':>14}  {'Model reach':>14}  {'Error %':>8}")
+                print("  " + "-" * 58)
+                for imps, actual, predicted, rel_err in r.residuals:
+                    err_pct = rel_err * 100 if not np.isnan(rel_err) else float("nan")
+                    sign = "+" if err_pct >= 0 else ""
+                    print(f"  {imps:>14,}  {actual:>14,}  {predicted:>14,}  {sign}{err_pct:>7.1f}%")
 
     if skipped:
         print()
@@ -288,6 +482,7 @@ def results_to_df(results: list[FitResult]) -> pd.DataFrame:
             "channel_name": r.channel_name,
             "channel_type": r.channel_type,
             "k (capacity)": r.k,
+            "k_fixed": r.k_fixed,
             "mu (midpoint)": r.mu,
             "sigma (spread)": r.sigma,
             "k_std_err": r.k_std_err,
@@ -377,11 +572,44 @@ def main() -> None:
 Examples:
   python fit_reach_params.py reach_parameter_template.csv
   python fit_reach_params.py my_data.csv --output results.csv
-  python fit_reach_params.py my_data.csv --output results.csv --plot
+
+  # Recommended: CT-mode — minimises relative error for balanced fit across all impression levels
+  python fit_reach_params.py test_fcap_old.csv --ct-mode
+  python fit_reach_params.py test_fcap_old.csv --ct-mode --output results.csv
+
+  # Diagnostic: show per-point residuals for the standard logistic mode
+  python fit_reach_params.py my_data.csv --residuals
         """,
     )
     parser.add_argument("input_csv", help="Path to the CSV file with campaign data")
     parser.add_argument("--output", "-o", help="Optional path to write results CSV")
+    parser.add_argument(
+        "--fixed-k",
+        type=float,
+        default=None,
+        metavar="VALUE",
+        help=(
+            "Fix k (capacity) to VALUE and fit only mu and sigma (2-parameter mode). "
+            "Use when you know the true reach ceiling — e.g. the observed FCAP saturation "
+            "as a fraction of total_addressable_adults. Example: --fixed-k 0.1137"
+        ),
+    )
+    parser.add_argument(
+        "--residuals",
+        action="store_true",
+        help="Print per-data-point predicted vs actual reach alongside the summary table",
+    )
+    parser.add_argument(
+        "--ct-mode",
+        action="store_true",
+        help=(
+            "Fit mu and sigma to the operational impression range only (density >= 5%% of "
+            "total adults). FCAP's formula diverges from a logistic at very low impression "
+            "density — sub-threshold points are excluded from the fit but shown in residuals. "
+            "This produces mu/sigma calibrated to where CT actually evaluates reach. "
+            "Implies --residuals."
+        ),
+    )
     parser.add_argument("--plot", action="store_true", help="Generate fitted curve plots (requires matplotlib)")
     args = parser.parse_args()
 
@@ -389,18 +617,35 @@ Examples:
         print(f"ERROR: file not found: {args.input_csv}", file=sys.stderr)
         sys.exit(1)
 
+    if args.fixed_k is not None and not (0.0 < args.fixed_k <= 1.0):
+        print("ERROR: --fixed-k must be between 0 and 1 (exclusive)", file=sys.stderr)
+        sys.exit(1)
+
+    show_residuals = args.residuals or args.ct_mode
+
     print(f"\nLoading data from: {args.input_csv}")
     df = load_csv(args.input_csv)
     print(f"Loaded {len(df)} valid data point(s) across {df.groupby(['channel_name','channel_type']).ngroups} channel(s)")
+
+    if args.ct_mode:
+        thr_pct = int(_CT_DENSITY_THRESHOLD * 100)
+        print(f"Mode: CT-mode fit  (operational range only — density >= {thr_pct}% of total adults)")
+    elif args.fixed_k is not None:
+        print(f"Mode: 2-parameter fit  (k fixed at {args.fixed_k})")
+    else:
+        print("Mode: 3-parameter fit  (k, mu, sigma all fitted from data)")
 
     results = []
     for (channel_name, channel_type), group in df.groupby(
         ["channel_name", "channel_type"], sort=False
     ):
-        result = fit_channel(str(channel_name), str(channel_type), group)
+        if args.ct_mode:
+            result = fit_channel_ct(str(channel_name), str(channel_type), group)
+        else:
+            result = fit_channel(str(channel_name), str(channel_type), group, fixed_k=args.fixed_k)
         results.append(result)
 
-    print_results(results)
+    print_results(results, show_residuals=show_residuals)
 
     if args.output:
         out_df = results_to_df(results)

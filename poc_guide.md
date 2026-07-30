@@ -180,6 +180,14 @@ python fit_reach_params.py my_data.csv --output results.csv
 python fit_reach_params.py my_data.csv --output results.csv --plot
 ```
 
+or 
+
+```bash
+# Print results to console
+.venv/bin/python fit_reach_params.py test_fcap.csv
+
+```
+
 ---
 
 ## Step 4: Read the Output
