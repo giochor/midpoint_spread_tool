@@ -2,6 +2,19 @@
 
 A tool for the Campaign Tactics team to automatically calculate the correct **Mid-point** (`mu`) and **Spread** (`sigma`) parameters for Reach Optimisation — eliminating the current trial-and-error process.
 
+## Running the app
+
+The easiest way to use this tool is the Streamlit web app — no command line needed.
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Your browser will open automatically at `http://localhost:8501`. Upload your campaign CSV (or tick **Use built-in sample data** to explore straight away), choose a fitting mode, and download the results.
+
+---
+
 ## Background
 
 **FCAP** (legacy platform) calculates reach for ATV channels only. **Reach Optimisation** (new platform) supports mixed channel allocation and was built to replace FCAP. However, with identical inputs, Reach Optimisation produces lower reach results than FCAP unless `reach_midpoint_parameter` and `reach_spread_parameter` are correctly configured per market and per channel.
@@ -138,7 +151,8 @@ If `--output` is specified, results are also written to a CSV with standard erro
 
 | File | Description |
 |------|-------------|
-| `fit_reach_params.py` | Main script |
+| `app.py` | Streamlit web app (recommended entry point) |
+| `fit_reach_params.py` | Core fitting script (also usable from the CLI) |
 | `reach_parameter_template.csv` | Worked example with 6 channels and synthetic data |
 | `template.csv` | Blank input template to fill in with real campaign data |
 | `test_fcap_old.csv` | Real ATV data (8 rows) used to validate CT-mode — produces mu=0.1819, sigma=0.1617 |
