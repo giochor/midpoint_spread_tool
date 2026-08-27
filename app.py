@@ -29,7 +29,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("📡 Reach Parameter Estimator")
+st.title("Reach Parameter Estimator")
 st.caption(
     "Fits logistic S-curve parameters (Mid-point **μ** and Spread **σ**) from campaign data, "
     "so markets can set PPS values without trial-and-error."
@@ -75,10 +75,8 @@ uploaded = st.file_uploader(
     help="Upload a CSV with at least the five required columns listed in the sidebar.",
 )
 
-use_sample = st.checkbox("Use built-in sample data instead", value=not bool(uploaded))
-
-if not uploaded and not use_sample:
-    st.info("Upload a CSV or tick the sample-data checkbox to begin.")
+if not uploaded:
+    st.info("Upload a CSV to begin.")
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -89,17 +87,10 @@ if not uploaded and not use_sample:
 def _load_bytes(raw: bytes) -> pd.DataFrame:
     return load_csv(io.StringIO(raw.decode("utf-8", errors="replace")))  # type: ignore[arg-type]
 
-@st.cache_data
-def _load_sample() -> pd.DataFrame:
-    return load_csv("reach_parameter_template.csv")
 
 try:
-    if uploaded and not use_sample:
-        df = _load_bytes(uploaded.read())
-        source_label = uploaded.name
-    else:
-        df = _load_sample()
-        source_label = "reach_parameter_template.csv (built-in)"
+    df = _load_bytes(uploaded.read())
+    source_label = uploaded.name
 except SystemExit:
     st.error("The file could not be loaded. Check that all required columns are present.")
     st.stop()
