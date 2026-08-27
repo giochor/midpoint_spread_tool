@@ -42,33 +42,16 @@ st.caption(
 with st.sidebar:
     st.header("Settings")
 
-    mode = st.radio(
-        "Fitting mode",
-        ["CT-mode (recommended)", "Standard 3-parameter", "Fixed k"],
-        help=(
-            "**CT-mode**: fits the logistic only to the operational impression range "
-            f"(density ≥ {int(_CT_DENSITY_THRESHOLD * 100)}% of total adults). "
-            "Reduces error at impression levels real campaigns actually operate at.\n\n"
-            "**Standard**: fits k, μ, σ from all data points.\n\n"
-            "**Fixed k**: you supply the capacity ceiling; only μ and σ are fitted."
-        ),
-    )
-
+    mode = "CT-mode (recommended)"
     fixed_k = None
-    if mode == "Fixed k":
-        fixed_k = st.number_input(
-            "k (capacity)",
-            min_value=0.001,
-            max_value=1.0,
-            value=0.12,
-            step=0.001,
-            format="%.4f",
-            help="Maximum reachable fraction of the total addressable adult universe (0–1).",
-        )
 
     show_residuals = st.checkbox(
         "Show per-point residuals",
-        value=(mode == "CT-mode (recommended)"),
+        value=False,
+        help=(
+            "For each data point, shows actual reach vs. what the fitted model predicts, "
+            "plus the percentage error. Useful for checking fit quality at each spend level."
+        ),
     )
 
     st.divider()
