@@ -6,8 +6,18 @@ A tool for the Campaign Tactics team to automatically calculate the correct **Mi
 
 The easiest way to use this tool is the Streamlit web app — no command line needed.
 
+**First time only** — create a virtual environment and install dependencies:
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+**Every subsequent time** — activate the environment and launch:
+
+```bash
+source .venv/bin/activate
 streamlit run app.py
 ```
 
